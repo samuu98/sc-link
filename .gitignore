@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+compose.local.yaml
+__pycache__/
+*.py[cod]
+.venv/
+state/
+downloads/
+*.sqlite3*
+*.db
+*.log
+*.mp4
+*.mkv
+*.pem
+*.key

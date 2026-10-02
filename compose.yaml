@@ -1,0 +1,41 @@
+name: sc-link
+services:
+  downloader:
+    image: ghcr.io/edoardofiore/streamingcommunity-downloader@sha256:19e3bef60034fa755de6a96e5cff1d793e072ab30c8bcdfd42466ded0b967e36
+    entrypoint: []
+    command: [python, -m, uvicorn, link_service:api, --app-dir, /service, --host, 0.0.0.0, --port, '8000', --no-access-log]
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8000}:8000"
+    environment:
+      SOURCE_HOST: ${SOURCE_HOST:-streamingcommunityz.pictures}
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost:8000}
+      DOWNLOAD_ROOT: /downloads
+      STATE_ROOT: /config
+      DATA_FILE: /service/engine.json
+      PYTHONPATH: /app:/service
+      TZ: ${TZ:-Europe/Rome}
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+      - ./:/service:ro
+      - ${STATE_DIRECTORY:-./state}:/config
+      - ${DOWNLOAD_DIRECTORY:-./downloads}:/downloads
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    restart: unless-stopped
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: '2'}
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=3)']
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

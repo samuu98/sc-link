@@ -1,0 +1,8 @@
+{
+  "settings": {
+    "max_segment_workers": 4,
+    "max_concurrent_downloads": 1,
+    "output_container": "mp4",
+    "subtitle_mode": "embed"
+  }
+}
