@@ -16,6 +16,7 @@ import time
 import uuid
 
 import requests
+import animeunity_provider
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -39,7 +40,7 @@ active = {}
 # Non attivare questi logger: DB, API e log del servizio non conservano token.
 logging.getLogger("app").disabled = True
 for name in ("app.core.film", "app.core.tv", "app.core._shared", "app.core.m3u8",
-             "app.core.format", "app.core.probe", "app.core.container"):
+             "app.core.format", "app.core.probe", "app.core.container", "app.core.animeunity"):
     logging.getLogger(name).disabled = True
 
 
@@ -70,12 +71,15 @@ def initialize():
           progress REAL NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
           error TEXT, output TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS watches (
-          id TEXT PRIMARY KEY, title_id INTEGER UNIQUE NOT NULL, name TEXT NOT NULL,
-          url TEXT NOT NULL, year TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT 'notify', enabled INTEGER NOT NULL DEFAULT 1,
-          snapshot TEXT NOT NULL, last_checked TEXT, scheduled_date TEXT NOT NULL,
-          error TEXT, created_at TEXT NOT NULL
-        )""")
+        watch_schema = """(
+          id TEXT PRIMARY KEY, title_id INTEGER NOT NULL, name TEXT NOT NULL,
+          url TEXT NOT NULL, year TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT 'notify',
+          enabled INTEGER NOT NULL DEFAULT 1, snapshot TEXT NOT NULL, last_checked TEXT,
+          scheduled_date TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'streamingcommunity', dubbed INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(provider,title_id)
+        )"""
+        con.execute("CREATE TABLE IF NOT EXISTS watches " + watch_schema)
         con.execute("""CREATE TABLE IF NOT EXISTS watch_items (
           watch_id TEXT NOT NULL, episode_id INTEGER NOT NULL, season INTEGER NOT NULL,
           number INTEGER NOT NULL, name TEXT NOT NULL, discovered_at TEXT NOT NULL,
@@ -88,6 +92,15 @@ def initialize():
         )""")
         if "year" not in {r[1] for r in con.execute("PRAGMA table_info(watches)")}:
             con.execute("ALTER TABLE watches ADD COLUMN year TEXT NOT NULL DEFAULT ''")
+        if "provider" not in {r[1] for r in con.execute("PRAGMA table_info(watches)")}:
+            # Replace the old unique title_id constraint with a source-aware key.
+            con.execute("CREATE TABLE watches_next " + watch_schema)
+            cols = "id,title_id,name,url,year,mode,enabled,snapshot,last_checked,scheduled_date,error,created_at"
+            con.execute(f"INSERT INTO watches_next ({cols}) SELECT {cols} FROM watches")
+            con.execute("DROP TABLE watches")
+            con.execute("ALTER TABLE watches_next RENAME TO watches")
+        if "dubbed" not in {r[1] for r in con.execute("PRAGMA table_info(watches)")}:
+            con.execute("ALTER TABLE watches ADD COLUMN dubbed INTEGER NOT NULL DEFAULT 1")
         columns = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
         for column in ("verified_at", "verification"):
             if column not in columns:
@@ -121,14 +134,28 @@ def update(job_id, **values):
                     [*values.values(), job_id])
 
 
+def provider_for_url(url):
+    try:
+        host = urlsplit(url.strip()).hostname
+    except ValueError:
+        raise HTTPException(400, "Link non valido")
+    return "animeunity" if host in animeunity_provider.HOSTS else "streamingcommunity"
+
+
+def title_key(title_id, provider="streamingcommunity"):
+    return f"animeunity:{title_id}" if provider == "animeunity" else str(title_id)
+
+
 def validate_url(url):
+    if provider_for_url(url) == "animeunity":
+        return animeunity_provider.validate_url(url)
     try:
         p = urlsplit(url.strip())
         port = p.port
     except ValueError:
         raise HTTPException(400, "Link non valido")
     if p.scheme != "https" or p.hostname != SOURCE_HOST or port not in (None, 443) or p.username or p.password:
-        raise HTTPException(400, f"Usa un link HTTPS di {SOURCE_HOST}")
+        raise HTTPException(400, f"Usa un link HTTPS di {SOURCE_HOST} oppure {animeunity_provider.HOST}")
     match = re.fullmatch(r"/(?:it/)?(?:titles|watch)/(\d+)(?:-[\w-]+)?/?", p.path)
     if not match:
         raise HTTPException(400, "Incolla il link della pagina di un film o di una serie")
@@ -158,6 +185,8 @@ def fetch_props(url):
 
 
 def inspect_link(url, season=None):
+    if provider_for_url(url) == "animeunity":
+        return animeunity_provider.inspect_link(url, season)
     title_id, selected_episode = validate_url(url)
     # Il sito richiede anche lo slug: /titles/55355 da solo risponde 404.
     path = urlsplit(url.strip()).path
@@ -171,7 +200,7 @@ def inspect_link(url, season=None):
         raise RuntimeError("Indirizzo del titolo non riconosciuto")
     canonical = f"https://{SOURCE_HOST}/it/titles/{title_id}-{slug}"
     result = {"id": title_id, "name": title["name"], "type": title["type"],
-              "year": (title.get("release_date") or "")[:4], "url": canonical,
+              "year": (title.get("release_date") or "")[:4], "url": canonical, "provider": "streamingcommunity",
               "seasons": [], "season": None, "episodes": [], "selected_episode": selected_episode}
     if title["type"] == "movie":
         return result
@@ -285,7 +314,11 @@ def run_job(row, event):
     try:
         if shutil.disk_usage(ROOT).free < RESERVE:
             raise RuntimeError("Spazio insufficiente: sono richiesti almeno 5 GiB liberi")
-        if payload["type"] == "movie":
+        if payload.get("provider") == "animeunity":
+            output = Path(animeunity_provider.download(payload, **common))
+            category = "Movies" if payload["type"] == "movie" else "TV"
+            target = ROOT / category / output.relative_to(scratch / "output")
+        elif payload["type"] == "movie":
             output = Path(download_film(id_film=payload["id"], title_name=payload["name"], **common))
             target = ROOT / "Movies" / output.relative_to(scratch / "output")
         else:
@@ -421,7 +454,7 @@ def health():
 def info():
     disk = shutil.disk_usage(ROOT)
     return {"source_host": SOURCE_HOST, "free_bytes": disk.free,
-            "download_path": str(ROOT), "reserve_bytes": RESERVE, "timezone": str(WATCH_TZ)}
+            "download_path": str(ROOT), "reserve_bytes": RESERVE, "timezone": str(WATCH_TZ), "providers": {"streamingcommunity": SOURCE_HOST, "animeunity": animeunity_provider.HOST}}
 
 
 @api.post("/api/inspect")
@@ -448,7 +481,7 @@ def insert_jobs(con, items):
     pending = []
     seen = set()
     for metadata, episode in items:
-        key = f"{metadata['id']}:{episode['id'] if episode else 'movie'}"
+        key = f"{title_key(metadata['id'], metadata.get('provider', 'streamingcommunity'))}:{episode['id'] if episode else 'movie'}"
         if key in seen:
             continue
         seen.add(key)
@@ -464,6 +497,8 @@ def insert_jobs(con, items):
         raise HTTPException(409, "Spazio insufficiente: sono richiesti almeno 5 GiB liberi")
     for metadata, episode, key in pending:
         payload = {k: metadata[k] for k in ("id", "name", "type", "year", "url", "season")}
+        payload["provider"] = metadata.get("provider", "streamingcommunity")
+        payload["dubbed"] = metadata.get("dubbed", True)
         payload["episode"] = episode
         job_id = uuid.uuid4().hex
         label = metadata["name"]
@@ -496,6 +531,8 @@ def enqueue(body: DownloadRequest):
             if not selected or len(episodes) != len(selected):
                 raise HTTPException(400, "Seleziona almeno un episodio disponibile per stagione")
         else:
+            if metadata.get("provider") == "animeunity" and not metadata["episodes"]:
+                raise HTTPException(409, "Il film AnimeUnity non ha ancora un episodio pubblicato")
             if body.selections or body.episode_ids:
                 raise HTTPException(400, "Un film non contiene stagioni o episodi")
             episodes = [None]
@@ -573,7 +610,8 @@ def series_catalog(url):
 def add_watch(body: WatchRequest):
     title_id, _ = validate_url(body.url)
     with connect() as con:
-        if con.execute("SELECT id FROM watches WHERE title_id=?", (title_id,)).fetchone():
+        provider = provider_for_url(body.url)
+        if con.execute("SELECT id FROM watches WHERE title_id=? AND provider=?", (title_id, provider)).fetchone():
             raise HTTPException(409, "Questa serie è già seguita")
     try:
         metadata, catalog = series_catalog(body.url)
@@ -584,9 +622,9 @@ def add_watch(body: WatchRequest):
     watch_id = uuid.uuid4().hex
     try:
         with connect() as con:
-            con.execute("INSERT INTO watches(id,title_id,name,url,year,mode,snapshot,last_checked,scheduled_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            con.execute("INSERT INTO watches(id,title_id,name,url,year,mode,snapshot,last_checked,scheduled_date,created_at,provider,dubbed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                         (watch_id, metadata["id"], metadata["name"], metadata["url"], metadata["year"], body.mode,
-                         json.dumps(catalog), now(), local_date(), now()))
+                         json.dumps(catalog), now(), local_date(), now(), provider, metadata.get("dubbed", True)))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Questa serie è già seguita")
     return {"id": watch_id, "baseline_episodes": sum(map(len, catalog.values())), "next_check": next_check()}
@@ -605,7 +643,7 @@ def watches():
             discoveries = con.execute("""SELECT w.*, (SELECT j.status FROM jobs j
                 WHERE j.content_key=? || ':' || w.episode_id ORDER BY j.created_at DESC LIMIT 1) AS download_status
                 FROM watch_items w WHERE watch_id=? ORDER BY season,number""",
-                (str(row["title_id"]), row["id"])).fetchall()
+                (title_key(row["title_id"], row["provider"]), row["id"])).fetchall()
             item["discoveries"] = [dict(r) for r in discoveries]
             item["next_check"] = next_check() if item["enabled"] else None
             item["checking"] = row["id"] in checking
@@ -666,11 +704,11 @@ def queue_watch_items(watch_id, automatic=False):
         row = con.execute("SELECT * FROM watches WHERE id=?", (watch_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Watch non trovato")
-            # Failed/cancelled jobs remain visible for explicit retry, never automatic retry storms.
+        # Failed/cancelled jobs remain visible for explicit retry, never automatic retry storms.
         items = con.execute("""SELECT w.* FROM watch_items w WHERE watch_id=? AND NOT EXISTS
           (SELECT 1 FROM jobs j WHERE j.content_key=? || ':' || w.episode_id)""",
-          (watch_id, str(row["title_id"]))).fetchall()
-    metadata = {"id": row["title_id"], "name": row["name"], "type": "tv", "year": row["year"], "url": row["url"]}
+          (watch_id, title_key(row["title_id"], row["provider"]))).fetchall()
+    metadata = {"id": row["title_id"], "name": row["name"], "type": "tv", "year": row["year"], "url": row["url"], "provider": row["provider"], "dubbed": bool(row["dubbed"])}
     with connect() as con:
         con.execute("BEGIN IMMEDIATE")
         current = con.execute("SELECT mode,enabled FROM watches WHERE id=?", (watch_id,)).fetchone()
@@ -768,7 +806,7 @@ def dashboard():
             "events": events, "checking": list(checking), "next_check": next_check(), "timezone": str(WATCH_TZ),
             "checks": {"database": True, "download_worker": bool(worker_thread and worker_thread.is_alive()),
                        "watch_scheduler": bool(watch_thread and watch_thread.is_alive()), "disk": disk.free >= RESERVE},
-            "disk": {"free": disk.free, "total": disk.total, "reserve": RESERVE}, "source_host": SOURCE_HOST}
+            "disk": {"free": disk.free, "total": disk.total, "reserve": RESERVE}, "source_host": SOURCE_HOST, "providers": {"streamingcommunity": SOURCE_HOST, "animeunity": animeunity_provider.HOST}}
 
 
 @api.post("/api/downloads/{job_id}/verify")

@@ -1,7 +1,8 @@
 # SC Link
 
 Un centro download per la propria libreria multimediale: incolla il link di
-un film o di una serie, scegli gli episodi, segui la coda e controlla le novità.
+un film o di una serie da **StreamingCommunity o AnimeUnity**, scegli gli episodi,
+segui la coda e controlla le novità.
 Interfaccia italiana responsive, senza framework frontend o risorse esterne.
 Usare esclusivamente contenuti per cui si possiedono i diritti o l'autorizzazione.
 
@@ -22,7 +23,7 @@ Usare esclusivamente contenuti per cui si possiedono i diritti o l'autorizzazion
   Il controllo non analizza ogni fotogramma; un errore resta visibile senza
   cancellare i file o cambiare la cronologia del download.
 - Un download alla volta, quattro richieste di segmenti in parallelo,
-  MP4 senza ricodifica, audio italiano quando presente.
+  MP4 senza ricodifica, audio italiano quando presente (oppure originale per gli anime non doppiati).
 - Cartelle `Movies` e `TV` compatibili con una libreria Jellyfin separata.
   Temporanei isolati in `.incomplete/<job-id>`.
 
@@ -79,11 +80,35 @@ al controllo successivo, oppure puoi usare “Scarica novità”. I download fal
 o annullati richiedono “Riprova”: il watch non avvia tentativi infiniti.
 Una serie in pausa non viene controllata; rimuoverla non cancella i video.
 
+## AnimeUnity
+
+Incolla un link `https://www.animeunity.so/anime/<id>-<slug>` (anche il dominio
+senza `www` è accettato). Il servizio legge metadati ed episodi pubblicati
+tramite `info_api`, con paginazione per le serie lunghe. Il numero di episodi
+previsti nella scheda non viene confuso con quelli disponibili. Se un batch
+fallisce, il catalogo incompleto non viene accettato dal watch.
+
+Serie/ONA/OVA/Special vengono raccolte nella stagione 1 della pagina specifica,
+con numero episodio originale, inclusi speciali decimali e intervalli. I film
+con un unico video vanno in Movies; gli altri contenuti in TV. Se il sito
+pubblica una nuova parte su un'altra pagina, **aggiungi un watch separato**:
+i titoli correlati non vengono seguiti automaticamente. La UI indica la fonte
+e la modalità di raccolta degli episodi.
+
+Il watch può segnalare o scaricare nuove uscite esattamente come per
+StreamingCommunity. Gli ID di job e watch sono distinti per sorgente;
+aggiungere AnimeUnity non modifica i download già presenti. Le edizioni ITA
+richiedono l'italiano, le edizioni originali il giapponese se esistono più tracce;
+per una singola traccia muxata viene usato l'audio della sorgente. Il doppiaggio
+mostrato nella UI è quello dichiarato dal sito, non un riconoscimento dell'audio.
+`ANIMEUNITY_HOST` configura il dominio, condiviso con il motore.
+
 ## Persistenza e aggiornamento
 
 `state/jobs.sqlite3` contiene coda, watch, fotografia degli episodi, novità e
 storico (ultimi 200 controlli, 30 mostrati in dashboard). La migrazione aggiunge
-tabelle e campi senza eliminare i job esistenti. Non conserva URL dei flussi,
+tabelle e campi senza eliminare i job esistenti. La chiave dei watch è
+`(provider, title_id)`; i watch esistenti vengono preservati come StreamingCommunity. Non conserva URL dei flussi,
 cookie o token della sorgente.
 
 Prima di aggiornare: ferma il container, salva una copia dei sorgenti, del
@@ -153,4 +178,6 @@ licenza MIT, commit `565bf268eba751e1ee5f33298168b7287dc4ade3`.
 L'immagine è fissata al digest in Compose. Il pannello, gli account e i processi
 periodici del progetto originale non vengono avviati. Il motore resta una
 dipendenza esterna; il suo codice non viene copiato in questo repository.
+Il motore fornisce anche `app.core.animeunity.download_anime_episode`; il
+modulo `animeunity_provider.py` normalizza metadati e cataloghi per SC Link.
 Il codice specifico di SC Link è distribuito con licenza [MIT](LICENSE).

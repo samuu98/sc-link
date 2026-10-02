@@ -9,6 +9,7 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8000}:8000"
     environment:
       SOURCE_HOST: ${SOURCE_HOST:-streamingcommunityz.pictures}
+      ANIMEUNITY_HOST: ${ANIMEUNITY_HOST:-www.animeunity.so}
       PUBLIC_HOST: ${PUBLIC_HOST:-localhost:8000}
       DOWNLOAD_ROOT: /downloads
       STATE_ROOT: /config
